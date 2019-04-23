@@ -226,8 +226,7 @@ class modbus_server:
 
     async def handle_transaction(self, client, buf):
         if len(buf) < 8:
-            client.sock.close()
-            return None
+            return -1
 
         req = modbus_request(buf)
 
@@ -240,8 +239,7 @@ class modbus_server:
         if req.proto_id != 0 or \
            req.len_field != 1 + 1 + len(req.data) or \
            not self.is_this_unit(req.unit):
-            client.sock.close();
-            return None
+            return -1
 
         err = check_pdu(req.fcode, req.data)
         if err is not None:
@@ -252,12 +250,18 @@ class modbus_server:
 
         await self.send_response(client, res)
 
+        return 0
+
     async def handle_client(self, client):
         buf = await self.loop.sock_recv(client.sock, MODBUS_TCP_MAX_BUF_LEN)
         if buf is not None and len(buf) > 0:
             client.stop_timing()
-            await self.handle_transaction(client, buf)
-            client.start_timing()
+            err = await self.handle_transaction(client, buf)
+            if err != 0:
+                client.sock.close()
+                return None
+            else:
+                client.start_timing()
         elif client.is_timeout():
             client.sock.shutdown(socket.SHUT_RDWR)
             client.sock.close()
