@@ -182,8 +182,9 @@ def check_fcode(fcode):
     return res
 
 class modbus_client:
-    def __init__(self, sock, max_elapsed_time=2):
-        self.sock = sock
+    def __init__(self, reader, writer, max_elapsed_time=2):
+        self.reader = reader
+        self.writer = writer
         self.max_elapsed_time = max_elapsed_time
         self.timing_started = False
 
@@ -197,16 +198,14 @@ class modbus_client:
     def is_timeout(self):
         return self.timing_started and (time() - self.begin > self.max_elapsed_time)
 
+    def close(self):
+        self.writer.close()
+
 class modbus_server:
-    def __init__(self, ip='0.0.0.0', port=5020, client_num=8, unit=1):
+    def __init__(self, ip='0.0.0.0', port=5020, unit=1):
         self.svr_ip = ip
         self.svr_port = port
-        self.max_client = client_num
         self.unit = unit
-        self.svr_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.svr_sock.bind((self.svr_ip, self.svr_port))
-        self.svr_sock.listen(self.max_client)
-        self.svr_sock.setblocking(False)
 
     def is_this_unit(self, unit):
         if unit == 0 or unit == self.unit:
@@ -222,7 +221,7 @@ class modbus_server:
         buf += res.fcode.to_bytes(length=1, byteorder='big')
         buf += res.data
 
-        await self.loop.sock_sendall(client.sock, buf)
+        client.writer.write(buf)
 
     async def handle_transaction(self, client, buf):
         if len(buf) < 8:
@@ -232,7 +231,7 @@ class modbus_server:
 
         print("Client {} transaction id: 0x{:x}, protocol id: 0x{:x}, "
               "len_field: {}, unit: 0x{:x}, function code: 0x{:x}, "
-              "data length: {} bytes".format(client.sock.getpeername(),
+              "data length: {} bytes".format(client.writer.get_extra_info('peername'),
               req.tran_id, req.proto_id, req.len_field, req.unit, req.fcode,
               len(req.data)))
 
@@ -253,35 +252,37 @@ class modbus_server:
         return 0
 
     async def handle_client(self, client):
-        buf = await self.loop.sock_recv(client.sock, MODBUS_TCP_MAX_BUF_LEN)
+        buf = await client.reader.read(MODBUS_TCP_MAX_BUF_LEN)
         if buf is not None and len(buf) > 0:
             client.stop_timing()
             err = await self.handle_transaction(client, buf)
             if err != 0:
-                client.sock.close()
+                client.close()
                 return None
             else:
                 client.start_timing()
         elif client.is_timeout():
-            client.sock.shutdown(socket.SHUT_RDWR)
-            client.sock.close()
+            client.close()
             return None
 
         self.loop.create_task(self.handle_client(client))
 
-    async def _run_server(self):
-        while True:
-            client_sock, cli_addr = await self.loop.sock_accept(self.svr_sock)
-            print("New client from {}".format(cli_addr))
-            client = modbus_client(client_sock)
-            self.loop.create_task(self.handle_client(client))
+    async def _run_server(self, reader, writer):
+        addr = writer.get_extra_info('peername')
+        print("New client from {}".format(addr))
+        client = modbus_client(reader, writer)
+        self.loop.create_task(self.handle_client(client))
 
     def run(self):
         self.loop = asyncio.get_event_loop()
-        self.loop.run_until_complete(self._run_server())
+        coro = asyncio.start_server(self._run_server, self.svr_ip, self.svr_port, loop=self.loop)
+        self.loop.run_until_complete(coro)
+        try:
+            self.loop.run_forever()
+        except KeyboardInterrupt:
+            self.close()
 
     def close(self):
-        self.svr_sock.close()
         self.loop.close()
 
     def __del__(self):
