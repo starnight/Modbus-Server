@@ -5,6 +5,7 @@ from math import ceil
 from random import randint
 from time import time
 import asyncio, socket
+import ssl
 
 MODBUS_TCP_MAX_BUF_LEN = 253 + 7
 
@@ -14,26 +15,33 @@ class modbus_exception(IntEnum):
     ILLEGAL_DATA_VALUE = 0x3
 
 class modbus_request:
-    def __init__(self, buf):
+    def __init__(self, buf, tls):
+        self.tls = tls
         self.parse_request(buf)
 
     def parse_request(self, buf):
-        self.tran_id = int.from_bytes(buf[0:2], byteorder='big')
-        self.proto_id = int.from_bytes(buf[2:4], byteorder='big')
-        self.len_field = int.from_bytes(buf[4:6], byteorder='big')
-        self.unit = int.from_bytes(buf[6:7], byteorder='big')
-        self.fcode = int.from_bytes(buf[7:8], byteorder='big')
-        self.data = buf[8:]
+        if not self.tls:
+            self.tran_id = int.from_bytes(buf[0:2], byteorder='big')
+            self.proto_id = int.from_bytes(buf[2:4], byteorder='big')
+            self.len_field = int.from_bytes(buf[4:6], byteorder='big')
+            self.unit = int.from_bytes(buf[6:7], byteorder='big')
+            self.fcode = int.from_bytes(buf[7:8], byteorder='big')
+            self.data = buf[8:]
+        else:
+            self.fcode = int.from_bytes(buf[0:1], byteorder='big')
+            self.data = buf[1:]
 
 class modbus_response:
-    def __init__(self, req, fcode, data):
+    def __init__(self, req, fcode, data, tls):
+        self.tls = tls
         self.build_response(req, fcode, data)
 
     def build_response(self, req, fcode, data):
-        self.tran_id = req.tran_id
-        self.proto_id = req.proto_id
-        self.len_field = 2 + len(data)
-        self.unit = req.unit
+        if not self.tls:
+            self.tran_id = req.tran_id
+            self.proto_id = req.proto_id
+            self.len_field = 2 + len(data)
+            self.unit = req.unit
         self.fcode = fcode
         self.data = data
 
@@ -202,9 +210,15 @@ class modbus_client:
         self.writer.close()
 
 class modbus_server:
-    def __init__(self, ip='0.0.0.0', port=5020, unit=1):
+    def __init__(self, ip='127.0.0.1', port=8020, tls=False, cert=None, key=None, unit=1):
         self.svr_ip = ip
         self.svr_port = port
+        self.tls = tls
+        if self.tls:
+            self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self.context.load_cert_chain(cert, key)
+        else:
+            self.context = None
         self.unit = unit
 
     def is_this_unit(self, unit):
@@ -213,31 +227,39 @@ class modbus_server:
         else:
             return False
 
-    async def send_response(self, client, res):
-        buf = res.tran_id.to_bytes(length=2, byteorder='big')
-        buf += res.proto_id.to_bytes(length=2, byteorder='big')
-        buf += res.len_field.to_bytes(length=2, byteorder='big')
-        buf += res.unit.to_bytes(length=1, byteorder='big')
-        buf += res.fcode.to_bytes(length=1, byteorder='big')
+    def send_response(self, client, res):
+        if not self.tls:
+            buf = res.tran_id.to_bytes(length=2, byteorder='big')
+            buf += res.proto_id.to_bytes(length=2, byteorder='big')
+            buf += res.len_field.to_bytes(length=2, byteorder='big')
+            buf += res.unit.to_bytes(length=1, byteorder='big')
+            buf += res.fcode.to_bytes(length=1, byteorder='big')
+        else:
+            buf = res.fcode.to_bytes(length=1, byteorder='big')
         buf += res.data
 
         client.writer.write(buf)
 
     async def handle_transaction(self, client, buf):
-        if len(buf) < 8:
+        if not self.tls and len(buf) < 8:
+            return -1
+        elif len(buf) < 2:
             return -1
 
-        req = modbus_request(buf)
+        req = modbus_request(buf, self.tls)
 
-        print("Client {} transaction id: 0x{:x}, protocol id: 0x{:x}, "
-              "len_field: {}, unit: 0x{:x}, function code: 0x{:x}, "
-              "data length: {} bytes".format(client.writer.get_extra_info('peername'),
-              req.tran_id, req.proto_id, req.len_field, req.unit, req.fcode,
-              len(req.data)))
+        client_info = "Client {} ".format(client.writer.get_extra_info('peername'))
+        if not self.tls:
+            client_info += "transaction id: 0x{:x}, protocol id: 0x{:x}," \
+                           "len_field: {}, unit: 0x{:x}, ".format(
+                            req.tran_id, req.proto_id, req.len_field, req.unit)
+        client_info += "function code: 0x{:x}, data length: {} bytes".format(
+                        req.fcode, len(req.data))
+        print(client_info)
 
-        if req.proto_id != 0 or \
+        if not self.tls and (req.proto_id != 0 or \
            req.len_field != 1 + 1 + len(req.data) or \
-           not self.is_this_unit(req.unit):
+           not self.is_this_unit(req.unit)):
             return -1
 
         err = check_pdu(req.fcode, req.data)
@@ -245,9 +267,9 @@ class modbus_server:
             res_fcode, res_data = have_modbus_exception(req.fcode, err)
         else:
             res_fcode, res_data = func_dict[req.fcode](req.fcode, req.data)
-        res = modbus_response(req, res_fcode, res_data)
+        res = modbus_response(req, res_fcode, res_data, self.tls)
 
-        await self.send_response(client, res)
+        self.send_response(client, res)
 
         return 0
 
@@ -275,7 +297,7 @@ class modbus_server:
 
     def run(self):
         self.loop = asyncio.get_event_loop()
-        coro = asyncio.start_server(self._run_server, self.svr_ip, self.svr_port, loop=self.loop)
+        coro = asyncio.start_server(self._run_server, self.svr_ip, self.svr_port, ssl=self.context, loop=self.loop)
         self.loop.run_until_complete(coro)
         try:
             self.loop.run_forever()
@@ -289,7 +311,7 @@ class modbus_server:
         self.close()
 
 if __name__ == '__main__':
-    server = modbus_server()
+    server = modbus_server(tls=True, cert='server.crt', key='server.key')
     print("MODBUS server listens on {}:{}".format(server.svr_ip, server.svr_port))
     server.run()
     print("MODBUS server closed")

@@ -33,3 +33,4 @@ The default listening port is **5020**.
 
 * [MODBUS Application Protocol Specification V1.1b3](http://www.modbus.org/docs/Modbus_Application_Protocol_V1_1b3.pdf)
 * [MODBUS Messaging on TCP/IP Implementation Guide V1.0b](http://www.modbus.org/docs/Modbus_Messaging_Implementation_Guide_V1_0b.pdf)
+* [MODBUS/TCP Security Protocol Specification](http://modbus.org/docs/MB-TCP-Security-v21_2018-07-24.pdf)
