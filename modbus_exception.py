@@ -1,3 +1,5 @@
+#!/bin/env python3
+
 from enum import IntEnum
 
 class modbus_exception(IntEnum):
