@@ -176,8 +176,8 @@ class modbus_server:
         self.loop.create_task(self._handle_client(client))
 
     def run(self):
-        self.loop = asyncio.get_event_loop()
-        coro = asyncio.start_server(self._run_server, self.host, self.port, loop=self.loop)
+        self.loop = asyncio.new_event_loop()
+        coro = asyncio.start_server(self._run_server, self.host, self.port)
         self.loop.run_until_complete(coro)
         try:
             self.loop.run_forever()
@@ -236,8 +236,8 @@ class modbus_tls_server(modbus_server):
         return buf
 
     def run(self):
-        self.loop = asyncio.get_event_loop()
-        coro = asyncio.start_server(self._run_server, self.host, self.port, ssl=self.context, loop=self.loop)
+        self.loop = asyncio.new_event_loop()
+        coro = asyncio.start_server(self._run_server, self.host, self.port, ssl=self.context)
         self.loop.run_until_complete(coro)
         try:
             self.loop.run_forever()
